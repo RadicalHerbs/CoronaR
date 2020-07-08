@@ -1,0 +1,163 @@
+---
+title: "Corona 4"
+author: "Charles Baird"
+date: "7/8/2020"
+output: pdf_document
+---
+
+## Corona map
+
+
+```{r}
+library(maps)
+library(magrittr)
+library(socviz)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(ggthemes)
+library(censusapi)
+
+# Add my key for Census API
+Sys.setenv(CENSUS_KEY="497db0a71281d3182fae2061b21010cf173b963d")
+readRenviron("~/.Renviron")
+Sys.getenv("CENSUS_KEY")
+
+# Get County level population
+POP <- getCensus(name = "pep/population", vars = c("POP"), region = "county:*", vintage = 2019)
+
+# Our map data uses "id" for county level FIPS
+# So we make our population data frame that way
+censPop19 <- cbind.data.frame("id" = paste(POP$state, POP$county, sep = ""), POP = POP$POP, stringsAsFactors = F)
+
+# Then we can join that to the map data
+county_withpop <- left_join(county_map, censPop19, by = "id")
+
+# Now we fetch confirmed cases of Covid 19
+# Use "id" for county level FIPS
+cov19 <- read.csv("https://static.usafacts.org/public/data/covid-19/covid_confirmed_usafacts.csv")
+names(cov19)[names(cov19) == "ï..countyFIPS"] <- "id"
+
+## covStat contains:
+#   new: New cases in past 7 days
+#   old: New cases in 7 days before new
+#   month: New cases in past 28 days
+
+covStat <- list(new = cov19[,ncol(cov19)] -
+                   cov19[,ncol(cov19) - 7],
+                 old = cov19[,ncol(cov19) - 7] -
+                   cov19[,ncol(cov19) - 14],
+                 month <- cov19[,ncol(cov19)] -
+                   cov19[,ncol(cov19) - 28])
+
+# Build a data frame with the stat we will use to color
+#   the counties (wkRate) the ratio of new cases in the
+#   past seven days to new cases in the seven previous
+rawRate <- covStat[[1]] / covStat[[2]]
+
+# The rates were rounded to the nearest tenth if decreasing
+#   But in order to more meaningfully show color change
+#   in higher rates, we will scale them down.
+#   A move to the left to decrease by a factor of ten
+#     percent will have the same color change as an increase
+#     by a factor of one. I'm still playing with the fill
+#     attributes and hopefully will map it directly later
+
+roundRate <- ifelse(rawRate < 0, NA, rawRate)
+roundRate <- ifelse(roundRate > 5, 5, roundRate)
+roundRate <- ifelse(roundRate < 1,
+                    round(roundRate/0.1)*0.1,
+                    (round(roundRate) / 10) + .9
+                    )
+
+df_rate <- cbind.data.frame(cov19[,1:4], covStat,
+                            wkRate = roundRate)
+# We will join our data by "id" (FIPS)
+# Get them on the same page
+
+county_data$id <- as.integer(county_data$id)
+county_map$id <- as.integer(county_map$id)
+
+# Join our data data frame with the map data frame
+df_rate_pop <- left_join(df_rate, county_data[,c(1,9)], by = "id")
+county_full <- left_join(county_map, df_rate_pop, by = "id")
+
+## This function makes a ggplot map with counties colored
+#   by the ratio of new cases this week over last week
+#   @param df: data frame with map and data
+#   @param i: increment to color map by
+#       1 i = 1 infection over past month per 1k people
+#       NA for all values below inc level
+#   @return: colored map
+
+plotCov <- function(df, i){
+  p <- ggplot(data = df,
+              mapping = aes(x = long,
+                            y = lat,
+                            fill = ifelse((df[,11] / df[,15])>(i*.001), wkRate, NA), group = group))
+  
+  p1 <- p + geom_polygon(color = "gray90", size = 0.01) + coord_equal() + ggtitle(paste(df$State,":","Over", i, "per 1000 infected in past 28 days"))
+  
+  # See the comments above roundRate to explain this mess
+  # The decreasing rates match up, but the increasing rates
+  #   go 1.1:2x, 1.2:3x, 1.3:4x, etc. Sorry
+  
+  p2 <- p1 + scale_fill_gradient2(low = scales::muted("blue"), mid = scales::muted("purple"), high = scales::muted("red"), midpoint = 1, breaks = c(seq(.2, .8, by = .2),  seq(1,1.5,by=.1)), labels = paste(c(seq(.2, .8, by=.2), seq(1,6, by = 1)),"x"), limits = c(.2,1.5))
+  
+  ret = p2 + labs(fill = "Weekly Change in Positive Cases") +
+    theme_map() +
+    guides(fill = guide_legend(nrow = 2, byrow = T)) + 
+    theme(legend.position = "bottom")
+  
+  return(ret)
+}
+
+## This generates a map with plotCov for given data at
+#   every infection level graduated at 1 per 1k infected
+#   in the last 4 weeks
+#
+#   @param df: data frame with map and data
+#   @return: colored map
+
+generState <- function(df){
+  j = 0
+  
+  mrEXP <- na.omit((df[,11] / df[,15]))
+
+  vec <- c()
+  index = 1
+  
+  # Produces a vector which indexes when a map is
+  #   actually different than the previous. So, in case
+  #   one county is blown up, you don't generate a bunch
+  #   of identical intermediate plots
+  while(sum(mrEXP>(j*.001)) > 0){
+    j = j + 1
+    if(sum(mrEXP>(j*.001)) != sum(mrEXP>((j-1)*.001))){
+      vec <- c(vec, (j-1))
+      index = index + 1
+    }
+  }
+  
+  # This exports the images we will convert to GIFs with
+  #   ffmpeg afterward as well as returns the maps
+  return(lapply(vec, function(x){
+    ggsave(paste0(df[1,9], which(vec == x), ".jpg"),
+           plotCov(df, x))
+    plotCov(df, x)
+  })
+  )
+}
+
+# Get the list of states we want to generate the series of
+#   maps for.
+SL <- levels(as.factor(county_full$State))
+names(SL) <- levels(as.factor(county_full$State))
+
+# Then apply generState to the list
+ML <- lapply(SL,
+       function(x){
+         generState(county_full[county_full$State == x,])
+       })
+
+```
