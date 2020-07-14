@@ -96,13 +96,13 @@ plotCov <- function(df, i){
                             y = lat,
                             fill = ifelse((df[,11] / df[,15])>(i*.001), wkRate, NA), group = group))
   
-  p1 <- p + geom_polygon(color = "gray90", size = 0.01) + coord_equal() + ggtitle(paste(df$State,":","Over", i, "per 1000 infected in past 28 days"))
+  p1 <- p + geom_polygon(color = "gray90", size = 0.01) + coord_equal() + ggtitle(paste(na.omit(df$State),":","Over", i, "per 1000 infected in past 28 days"))
   
   # See the comments above roundRate to explain this mess
   # The decreasing rates match up, but the increasing rates
   #   go 1.1:2x, 1.2:3x, 1.3:4x, etc. Sorry
   
-  p2 <- p1 + scale_fill_gradient2(low = "blue", mid = "purple, high = "red", midpoint = 1, breaks = c(seq(.2, .8, by = .2),  seq(1,1.5,by=.1)), labels = paste(c(seq(.2, .8, by=.2), seq(1,6, by = 1)),"x"), limits = c(.2,1.5))
+  p2 <- p1 + scale_fill_gradient2(low = "blue", mid = "purple", high = "red", midpoint = 1, breaks = c(.1, seq(.2, .8, by = .2),  seq(1,1.5,by=.1), 1.9), labels = paste(c(.1, seq(.2, .8, by=.2), seq(1,6, by = 1), 10),"x"), limits = c(.2,1.5))
   
   ret = p2 + labs(fill = "Weekly Change in Positive Cases") +
     theme_map() +
@@ -111,7 +111,9 @@ plotCov <- function(df, i){
   
   return(ret)
 }
+```
 
+```{r}
 ## This generates a map with plotCov for given data at
 #   every infection level graduated at 1 per 1k infected
 #   in the last 4 weeks
@@ -142,13 +144,15 @@ generState <- function(df){
   # This exports the images we will convert to GIFs with
   #   ffmpeg afterward as well as returns the maps
   return(lapply(vec, function(x){
-    ggsave(paste0(df[1,9], which(vec == x), ".jpg"),
+    ggsave(paste0(df$State[which(!is.na(df$State))[1]], which(vec == x), ".jpg"),
            plotCov(df, x))
     plotCov(df, x)
   })
   )
 }
+```
 
+```{r}
 # Get the list of states we want to generate the series of
 #   maps for.
 SL <- levels(as.factor(county_full$State))
@@ -159,5 +163,7 @@ ML <- lapply(SL,
        function(x){
          generState(county_full[county_full$State == x,])
        })
-
+ncol(cov19)
+head(county_full)
+generState(county_full[county_full$State == "TX",])
 ```
