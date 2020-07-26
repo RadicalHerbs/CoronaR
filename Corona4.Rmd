@@ -1,12 +1,9 @@
 ---
-title: "Corona 4"
+title: "County Level Corona Maps"
 author: "Charles Baird"
-date: "7/8/2020"
+date: "7/25/2020"
 output: pdf_document
 ---
-
-## Corona map
-
 
 ```{r}
 library(maps)
@@ -20,7 +17,6 @@ library(censusapi)
 
 # Add my key for Census API
 Sys.setenv(CENSUS_KEY="497db0a71281d3182fae2061b21010cf173b963d")
-readRenviron("~/.Renviron")
 Sys.getenv("CENSUS_KEY")
 
 # Get County level population
@@ -30,58 +26,79 @@ POP <- getCensus(name = "pep/population", vars = c("POP"), region = "county:*", 
 # So we make our population data frame that way
 censPop19 <- cbind.data.frame("id" = paste(POP$state, POP$county, sep = ""), POP = POP$POP, stringsAsFactors = F)
 
+# County level map data
+map <- county_map
+
+# "Wade Hampton Census Area, Alaska" (geo code AK270, 
+# FIPS code 02270) was renamed and recoded as "Kusilvak 
+# Census Area" (AK158, 02158) effective July 1, 2015.
+map[map$id == "02270", ]$id <- "02158"
+
+# Lakota County (FIPS 46102) as of May 1st, 2015.
+# Action: replace FIPS code 46102 with the old code 46113.
+map[map$id == "46113", ]$id <- "46102"
+
+# Virginia, 2013: Bedford (independent) city (FIPS 51515) 
+# was changed to town status and added to Bedford County
+# (FIPS 51019) effective July 1st, 2013.
+map[map$id == "51515", ]$id <- "51019"
+
 # Then we can join that to the map data
-county_withpop <- left_join(county_map, censPop19, by = "id")
+map_withPop <- left_join(map, censPop19, by = "id")
 
 # Now we fetch confirmed cases of Covid 19
 # Use "id" for county level FIPS
 cov19 <- read.csv("https://static.usafacts.org/public/data/covid-19/covid_confirmed_usafacts.csv")
 names(cov19)[names(cov19) == "ï..countyFIPS"] <- "id"
 
+# Remove statewide unallocated and NYC unallocated/probable
+# Remove Grand Princess Cruise Ship
+cov19 <- cov19[as.integer(cov19$id) > 1000 &
+                 cov19$id != "6000",]
+```
+
+```{r}
+# Change Wade Hampton
+
+cov19[as.integer(cov19$id) == 2270, ]$id <- "02158"
+
 ## covStat contains:
 #   new: New cases in past 7 days
 #   old: New cases in 7 days before new
 #   month: New cases in past 28 days
 
-covStat <- list(new = cov19[,ncol(cov19)] -
+covStat <- data.frame(new = cov19[,ncol(cov19)] -
                    cov19[,ncol(cov19) - 7],
                  old = cov19[,ncol(cov19) - 7] -
                    cov19[,ncol(cov19) - 14],
-                 month <- cov19[,ncol(cov19)] -
+                 month = cov19[,ncol(cov19)] -
                    cov19[,ncol(cov19) - 28])
+
+covStat <- apply(covStat, 2, function(x){
+  ifelse(x < 0, 0, x)
+})
+
+adjRate <- apply(covStat, 1, function(x){
+  ifelse(x[2] == 0, (2 * x[1]) / (x[3] + 1), x[1] / x[2])
+})
+
+adjRate <- ifelse(adjRate < 1/4, 1/4, ifelse(adjRate > 4, 4, adjRate))
 
 # Build a data frame with the stat we will use to color
 #   the counties (wkRate) the ratio of new cases in the
 #   past seven days to new cases in the seven previous
-rawRate <- covStat[[1]] / covStat[[2]]
-
-# The rates were rounded to the nearest tenth if decreasing
-#   But in order to more meaningfully show color change
-#   in higher rates, we will scale them down.
-#   A move to the left to decrease by a factor of ten
-#     percent will have the same color change as an increase
-#     by a factor of one. I'm still playing with the fill
-#     attributes and hopefully will map it directly later
-
-roundRate <- ifelse(rawRate < 0, NA, rawRate)
-roundRate <- ifelse(roundRate > 5, 5, roundRate)
-roundRate <- ifelse(roundRate < 1,
-                    round(roundRate/0.1)*0.1,
-                    (round(roundRate) / 10) + .9
-                    )
-
 df_rate <- cbind.data.frame(cov19[,1:4], covStat,
-                            wkRate = roundRate)
+                            wkRate = adjRate)
+
 # We will join our data by "id" (FIPS)
 # Get them on the same page
+map_withPop$id <- as.integer(map_withPop$id)
+df_rate$id <- as.integer(df_rate$id)
 
-county_data$id <- as.integer(county_data$id)
-county_map$id <- as.integer(county_map$id)
+map_FULL <- left_join(map_withPop, df_rate, by = "id")
+```
 
-# Join our data data frame with the map data frame
-df_rate_pop <- left_join(df_rate, county_data[,c(1,9)], by = "id")
-county_full <- left_join(county_map, df_rate_pop, by = "id")
-
+```{r}
 ## This function makes a ggplot map with counties colored
 #   by the ratio of new cases this week over last week
 #   @param df: data frame with map and data
@@ -91,23 +108,36 @@ county_full <- left_join(county_map, df_rate_pop, by = "id")
 #   @return: colored map
 
 plotCov <- function(df, i){
-  p <- ggplot(data = df,
-              mapping = aes(x = long,
-                            y = lat,
-                            fill = ifelse((df[,11] / df[,15])>(i*.001), wkRate, NA), group = group))
+  inc <- (as.numeric(df[,14])/as.numeric(df[,8])) > (i/1000)
   
-  p1 <- p + geom_polygon(color = "gray90", size = 0.01) + coord_equal() + ggtitle(paste(na.omit(df$State),":","Over", i, "per 1000 infected in past 28 days"))
+  p0 <- ggplot(data = df,
+               mapping = aes(x = long, y = lat,
+                             fill = ifelse(inc, log(wkRate),
+                                           NA),
+                             group = group)) +
+    ggtitle(paste(na.omit(df$State),":","Over", i,
+                  "per 1000 infected in past 28 days", "\n",
+                  "(Counties grayed out when below
+                  threshold)"))
   
-  # See the comments above roundRate to explain this mess
-  # The decreasing rates match up, but the increasing rates
-  #   go 1.1:2x, 1.2:3x, 1.3:4x, etc. Sorry
+  p1 <- p0 + geom_polygon(color = "gray90",
+                          size = 0.01) + coord_equal()
   
-  p2 <- p1 + scale_fill_gradient2(low = "blue", mid = "purple", high = "red", midpoint = 1, breaks = c(.1, seq(.2, .8, by = .2),  seq(1,1.5,by=.1), 1.9), labels = paste(c(.1, seq(.2, .8, by=.2), seq(1,6, by = 1), 10),"x"), limits = c(.2,1.5))
+  p2 <- p1 +
+    scale_fill_distiller(palette = "Spectral",
+                         breaks = c(log(1/4), log(1/2),
+                                    log(1), log(2), log(4)),
+                         labels = c(expression(over("x","4+"),
+                                               over("x", "2"),
+                                               "1x", "2x",
+                                               "4x")),
+                         limits = c(log(1/4), log(4)))
   
-  ret = p2 + labs(fill = "Weekly Change in Positive Cases") +
+  ret = p2 + labs(fill = "Weekly Rate of Increase: ") +
     theme_map() +
-    guides(fill = guide_legend(nrow = 2, byrow = T)) + 
-    theme(legend.position = "bottom")
+    theme(legend.position = "bottom", legend.text =
+            element_text(vjust = .5), legend.title =
+            element_text(vjust = .25))
   
   return(ret)
 }
@@ -124,7 +154,7 @@ plotCov <- function(df, i){
 generState <- function(df){
   j = 0
   
-  mrEXP <- na.omit((df[,11] / df[,15]))
+  inc <- df[,14] / as.numeric(df[,8])
 
   vec <- c()
   index = 1
@@ -133,9 +163,9 @@ generState <- function(df){
   #   actually different than the previous. So, in case
   #   one county is blown up, you don't generate a bunch
   #   of identical intermediate plots
-  while(sum(mrEXP>(j*.001)) > 0){
+  while(sum(inc>(j*.001)) > 0){
     j = j + 1
-    if(sum(mrEXP>(j*.001)) != sum(mrEXP>((j-1)*.001))){
+    if(sum(inc>(j*.001)) != sum(inc>((j-1)*.001))){
       vec <- c(vec, (j-1))
       index = index + 1
     }
@@ -150,20 +180,6 @@ generState <- function(df){
   })
   )
 }
-```
 
-```{r}
-# Get the list of states we want to generate the series of
-#   maps for.
-SL <- levels(as.factor(county_full$State))
-names(SL) <- levels(as.factor(county_full$State))
-
-# Then apply generState to the list
-ML <- lapply(SL,
-       function(x){
-         generState(county_full[county_full$State == x,])
-       })
-ncol(cov19)
-head(county_full)
-generState(county_full[county_full$State == "TX",])
+generState(map_FULL)
 ```
